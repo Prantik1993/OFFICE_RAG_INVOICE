@@ -1,7 +1,6 @@
 import os
+import pickle
 from langchain_openai import ChatOpenAI
-from langchain_chroma import Chroma
-from langchain_community.retrievers import BM25Retriever
 from langchain.retrievers import EnsembleRetriever, ContextualCompressionRetriever
 from langchain.retrievers.document_compressors import CrossEncoderReranker
 from langchain_community.cross_encoders import HuggingFaceCrossEncoder
@@ -17,15 +16,29 @@ def format_docs(docs):
     formatted = []
     for doc in docs:
         meta = doc.metadata
-        # Extract metadata like page numbers and source files
         source_info = f"Source: {meta.get('filename', 'doc')} (Page {meta.get('page_number', 0)})"
         formatted.append(f"{source_info}\nContent: {doc.page_content}")
     return "\n\n".join(formatted)
 
+def load_bm25_retriever():
+    """Loads the persisted BM25 retriever or returns None on failure."""
+    if not os.path.exists(Config.BM25_INDEX_PATH):
+        print("⚠️ BM25 index not found. Run ingestion first. Falling back to Vector only.")
+        return None
+    
+    try:
+        with open(Config.BM25_INDEX_PATH, "rb") as f:
+            retriever = pickle.load(f)
+            retriever.k = Config.TOP_K
+            return retriever
+    except Exception as e:
+        print(f"⚠️ Failed to load BM25 index: {e}. Falling back to Vector only.")
+        return None
+
 def build_rag_chain():
     """
     Builds the Modern Hybrid RAG Chain.
-    Replaces: QA Pipeline, HybridRetriever, Reranker, and LLMClient.
+    Pipeline: Hybrid Search (Vector + BM25) -> Rerank (Cross-Encoder) -> LLM
     """
     
     # 1. Setup Semantic Search (Vector)
@@ -33,29 +46,19 @@ def build_rag_chain():
     vector_retriever = vectorstore.as_retriever(search_kwargs={"k": Config.TOP_K})
 
     # 2. Setup Keyword Search (BM25)
-    # Note: efficient BM25 typically requires persisting the index. 
-    # For simplicity here, we rebuild it from the vectorstore docs.
-    # If your DB is huge, you should use a persistent BM25 retriever instead.
-    try:
-        # Fetch all docs to initialize BM25 (Warning: can be slow for large datasets)
-        all_docs = vectorstore.get()["documents"]
-        if all_docs:
-            bm25_retriever = BM25Retriever.from_texts(all_docs)
-            bm25_retriever.k = Config.TOP_K
-            
-            # Combine into Hybrid Search (Ensemble)
-            base_retriever = EnsembleRetriever(
-                retrievers=[bm25_retriever, vector_retriever],
-                weights=[0.4, 0.6]
-            )
-        else:
-            base_retriever = vector_retriever
-    except Exception as e:
-        print(f"⚠️ BM25 Init failed: {e}. Falling back to standard vector search.")
+    bm25_retriever = load_bm25_retriever()
+
+    if bm25_retriever:
+        # Hybrid Search (Ensemble)
+        base_retriever = EnsembleRetriever(
+            retrievers=[bm25_retriever, vector_retriever],
+            weights=[0.4, 0.6]
+        )
+    else:
+        # Fallback to Vector only
         base_retriever = vector_retriever
 
     # 3. Setup Reranking (Cross Encoder)
-    # This replaces your 'src/rag/reranker.py'
     try:
         model = HuggingFaceCrossEncoder(model_name="cross-encoder/ms-marco-MiniLM-L-6-v2")
         compressor = CrossEncoderReranker(model=model, top_n=Config.TOP_K)
@@ -66,7 +69,7 @@ def build_rag_chain():
         print("⚠️ Reranker model failed to load. Using base retriever.")
         final_retriever = base_retriever
 
-    # 4. Define Prompt (Replaces prompt_templates.py)
+    # 4. Define Prompt
     template = """You are a Legal Policy Assistant. Answer based ONLY on the context below.
     
     CRITICAL RULES:
@@ -82,11 +85,10 @@ def build_rag_chain():
     
     prompt = ChatPromptTemplate.from_template(template)
 
-    # 5. Define LLM (Replaces llm_client.py)
+    # 5. Define LLM
     llm = ChatOpenAI(model=Config.OPENAI_MODEL, temperature=0)
 
-    # 6. Build the Chain (LCEL)
-    # This replaces 'qa_pipeline.py' manual stitching
+    # 6. Build the Chain
     chain = (
         {"context": final_retriever | format_docs, "question": RunnablePassthrough()}
         | prompt

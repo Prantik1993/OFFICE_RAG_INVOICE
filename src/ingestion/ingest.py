@@ -14,7 +14,7 @@ def ingest_documents():
     3. Indexes vectors in ChromaDB.
     4. Builds and persists BM25 keyword index.
     """
-    print(f"📂 Scanning {Config.RAW_DOCS_DIR}...")
+    print(f" Scanning {Config.RAW_DOCS_DIR}...")
     
     # 1. Load Documents
     loader = DirectoryLoader(
@@ -23,10 +23,10 @@ def ingest_documents():
         loader_cls=PyMuPDFLoader
     )
     documents = loader.load()
-    print(f"📄 Loaded {len(documents)} pages.")
+    print(f"Loaded {len(documents)} pages.")
     
     if not documents:
-        print("⚠️ No documents found. Exiting.")
+        print("No documents found. Exiting.")
         return
 
     # 2. Split Text (Optimized for Legal)
@@ -37,15 +37,15 @@ def ingest_documents():
         separators=["\n\n", "\nArticle ", "\nSection ", "\n", ". ", " ", ""]
     )
     chunks = text_splitter.split_documents(documents)
-    print(f"🧩 Created {len(chunks)} chunks.")
+    print(f"Created {len(chunks)} chunks.")
 
     # 3. Index in Chroma (Vector Store)
-    print("🔮 Indexing Vectors...")
+    print("Indexing Vectors...")
     vectorstore = get_vectorstore()
     vectorstore.add_documents(chunks)
     
     # 4. Build & Persist BM25 (Keyword Search)
-    print("🔤 Building BM25 Index...")
+    print("Building BM25 Index...")
     bm25_retriever = BM25Retriever.from_documents(chunks)
     bm25_retriever.k = Config.TOP_K
     
@@ -53,7 +53,7 @@ def ingest_documents():
     with open(Config.BM25_INDEX_PATH, "wb") as f:
         pickle.dump(bm25_retriever, f)
         
-    print(f"✅ Ingestion complete. BM25 index saved to {Config.BM25_INDEX_PATH}")
+    print(f"Ingestion complete. BM25 index saved to {Config.BM25_INDEX_PATH}")
 
 if __name__ == "__main__":
     ingest_documents()

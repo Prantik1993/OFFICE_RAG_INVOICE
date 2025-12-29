@@ -23,7 +23,7 @@ def format_docs(docs):
 def load_bm25_retriever():
     """Loads the persisted BM25 retriever or returns None on failure."""
     if not os.path.exists(Config.BM25_INDEX_PATH):
-        print("⚠️ BM25 index not found. Run ingestion first. Falling back to Vector only.")
+        print(" BM25 index not found. Run ingestion first. Falling back to Vector only.")
         return None
     
     try:
@@ -32,7 +32,7 @@ def load_bm25_retriever():
             retriever.k = Config.TOP_K
             return retriever
     except Exception as e:
-        print(f"⚠️ Failed to load BM25 index: {e}. Falling back to Vector only.")
+        print(f"Failed to load BM25 index: {e}. Falling back to Vector only.")
         return None
 
 def build_rag_chain():
@@ -61,7 +61,7 @@ def build_rag_chain():
             base_compressor=compressor, base_retriever=base_retriever
         )
     except Exception:
-        print("⚠️ Reranker model failed to load. Using base retriever.")
+        print(" Reranker model failed to load. Using base retriever.")
         final_retriever = base_retriever
 
     # --- 2. History-Awareness Logic ---

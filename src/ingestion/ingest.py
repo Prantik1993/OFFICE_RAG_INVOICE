@@ -1,76 +1,158 @@
 import os
+import re
 import shutil
 import pickle
 import logging
+from typing import List
+from langchain_core.documents import Document
 from langchain_community.document_loaders import PyMuPDFLoader, DirectoryLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain.retrievers import ParentDocumentRetriever
+from langchain.storage import LocalFileStore, EncoderBackedStore
 from langchain_community.retrievers import BM25Retriever
 from ..vectorstore.store import get_vectorstore
 from ..utils.config import Config
+from ..utils.logger import setup_logging
 
+setup_logging()
 logger = logging.getLogger(__name__)
 
-def ingest_documents():
+def preprocess_legal_text(docs: List[Document]) -> List[Document]:
     """
-    Ingests PDFs with updated chunking settings.
-    This will WIPE the existing database to ensure new settings are applied.
-    """
-    logger.info(f"Scanning {Config.RAW_DOCS_DIR}...")
-    logger.info(f"Config: Chunk Size={Config.CHUNK_SIZE}, Overlap={Config.CHUNK_OVERLAP}")
+    SMART CONTEXT INJECTION:
+    Scans the documents for "Article X" headers.
+    When it finds one, it prepends "Context: Article X - " to every subsequent 
+    paragraph until it finds the next Article.
     
-    # 1. Load Documents
+    This ensures that a chunk containing just "1. The regulation..." 
+    becomes "Context: Article 1 - 1. The regulation...".
+    """
+    logger.info("Running Smart Legal Context Injection...")
+    
+    enriched_docs = []
+    current_context = "General Preamble" # Default before Article 1
+    
+    # regex to find "Article 1", "Article 2", etc.
+    # We look for "Article" followed by a number on its own line or start of line
+    article_pattern = re.compile(r'(?:^|\n)(Article\s+\d+)', re.IGNORECASE)
+    
+    for doc in docs:
+        content = doc.page_content
+        
+        # Split the page by lines to process linearly
+        lines = content.split('\n')
+        new_lines = []
+        
+        for line in lines:
+            # Check if this line defines a new Article
+            match = article_pattern.search(line)
+            if match:
+                current_context = match.group(1).strip() # Update context to "Article 1"
+            
+            # Prepend context to the line if it's a substantive point (has text)
+            if line.strip():
+                # We add the context invisible to the user but visible to the embedding
+                # format: [Article 1] The text...
+                new_line = f"[{current_context}] {line}"
+                new_lines.append(new_line)
+            else:
+                new_lines.append(line)
+        
+        # Reassemble the document
+        enriched_text = "\n".join(new_lines)
+        
+        # Create new doc with modified content
+        new_doc = Document(
+            page_content=enriched_text,
+            metadata=doc.metadata
+        )
+        enriched_docs.append(new_doc)
+        
+    return enriched_docs
+
+def ingest_documents():
+    logger.info(f"Scanning {Config.RAW_DOCS_DIR}...")
+    
+    # 1. Load PDFs
     loader = DirectoryLoader(
         str(Config.RAW_DOCS_DIR),
         glob="**/*.pdf",
         loader_cls=PyMuPDFLoader
     )
-    documents = loader.load()
-    logger.info(f"Loaded {len(documents)} pages.")
-    
-    if not documents:
-        logger.warning("No documents found. Exiting.")
+    raw_docs = loader.load()
+    if not raw_docs:
+        logger.warning("No documents found.")
         return
+    logger.info(f"Loaded {len(raw_docs)} pages.")
 
-    # 2. Split Text (Optimized for Legal with Regex)
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=Config.CHUNK_SIZE,
-        chunk_overlap=Config.CHUNK_OVERLAP,
-        is_separator_regex=True,
-        separators=[
-            r"\nArticle \d+",    # Splits on "Article 1", "Article 2"
-            r"\n\d+\.\s+",       # Splits on "1. ", "2. " (Like Article 1.1)
-            r"\n\(\w\)\s+",      # Splits on "(a)", "(b)" (Like Article 2.1.a)
-            r"\n\n",             # Paragraph breaks
-            r"\.",               # Sentences
-            " "
-        ]
-    )
-    chunks = text_splitter.split_documents(documents)
-    logger.info(f"Created {len(chunks)} chunks (Previous: ~{len(documents)*2}).")
+    # 2. APPLY THE MAGIC FIX: Inject Context
+    docs = preprocess_legal_text(raw_docs)
 
-    # 3. Clear Old Vector Store (Critical for applying new chunk sizes)
+    # 3. Clear Old Stores
     if os.path.exists(Config.CHROMA_DIR):
-        try:
-            shutil.rmtree(Config.CHROMA_DIR)
-            logger.info(f"CLEARED old database at {Config.CHROMA_DIR}")
-        except Exception as e:
-            logger.error(f"Failed to clear old vector store: {e}")
+        shutil.rmtree(Config.CHROMA_DIR)
+    if os.path.exists(Config.DOC_STORE_DIR):
+        shutil.rmtree(Config.DOC_STORE_DIR)
 
-    # 4. Index Vectors
-    logger.info("Indexing Vectors...")
-    vectorstore = get_vectorstore()
-    vectorstore.add_documents(chunks)
+    # 4. Define Splitters
+    # Parent: The full context is now even richer
+    parent_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=Config.PARENT_CHUNK_SIZE,
+        chunk_overlap=Config.PARENT_CHUNK_OVERLAP
+    )
     
-    # 5. Build BM25
+    # Child: Smaller chunks, but now they ALL carry the "Article X" tag!
+    child_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=Config.CHILD_CHUNK_SIZE,
+        chunk_overlap=Config.CHILD_CHUNK_OVERLAP,
+        is_separator_regex=True,
+        # We split on the injected context too
+        separators=[
+            r"\n\n",             # Double newlines (Paragraph breaks)
+            r"\nArticle \d+",    # "Article 10", "Article 20"
+            r"\nSection \d+",    # "Section 5"
+            r"\n\d+\.\s+",       # Numbered lists: "1. ", "2. ", "10. "
+            r"\n\(\d+\)\s+",     # Parenthesis numbers: "(1) ", "(2) "
+            r"\n[a-z]\)\s+",     # Lettered lists: "a) ", "b) "
+            r"\n",               # Standard line breaks
+            r"\. ",              # Sentences
+            " ",                 # Words
+            ""                   # Characters
+    ])
+
+    # 5. Initialize Storage
+    vectorstore = get_vectorstore()
+    
+    fs = LocalFileStore(str(Config.DOC_STORE_DIR))
+    store = EncoderBackedStore(
+        store=fs,
+        key_encoder=lambda x: x,
+        value_serializer=pickle.dumps,
+        value_deserializer=pickle.loads
+    )
+    
+    retriever = ParentDocumentRetriever(
+        vectorstore=vectorstore,
+        docstore=store,
+        child_splitter=child_splitter,
+        parent_splitter=parent_splitter
+    )
+
+    # 6. Index
+    logger.info("Indexing Enriched Chunks...")
+    retriever.add_documents(docs, ids=None)
+    
+    # 7. Build BM25 (Hybrid Search)
     logger.info("Building BM25 Index...")
-    bm25_retriever = BM25Retriever.from_documents(chunks)
-    bm25_retriever.k = Config.FETCH_K  # Allow BM25 to search broad too
+    parent_chunks = parent_splitter.split_documents(docs)
+    bm25_retriever = BM25Retriever.from_documents(parent_chunks)
+    bm25_retriever.k = Config.FETCH_K
     
     os.makedirs(os.path.dirname(Config.BM25_INDEX_PATH), exist_ok=True)
     with open(Config.BM25_INDEX_PATH, "wb") as f:
         pickle.dump(bm25_retriever, f)
         
-    logger.info("Ingestion complete! Restart the Streamlit app now.")
+    logger.info("Ingestion Complete")
 
 if __name__ == "__main__":
     ingest_documents()

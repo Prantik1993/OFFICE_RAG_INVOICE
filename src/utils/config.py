@@ -3,13 +3,6 @@ import logging
 from pathlib import Path
 from dotenv import load_dotenv
 
-# Configure Global Logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-
 load_dotenv()
 
 class Config:
@@ -17,6 +10,7 @@ class Config:
     BASE_DIR = Path(__file__).parent.parent.parent
     DATA_DIR = BASE_DIR / "data"
     CHROMA_DIR = DATA_DIR / "chroma_db"
+    DOC_STORE_DIR = DATA_DIR / "doc_store"
     RAW_DOCS_DIR = DATA_DIR / "raw_docs"
     BM25_INDEX_PATH = DATA_DIR / "bm25_index.pkl"
     
@@ -24,19 +18,19 @@ class Config:
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
     OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4")
     
-    # Using MiniLM? It has a max token limit of 512 (~2000 chars).
-    # Keep chunks well below this limit to ensure high-quality embeddings.
-    EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+    # SETTING: BAAI/bge-m3
+    EMBEDDING_MODEL_NAME = "BAAI/bge-m3"
+    EMBEDDING_DEVICE = "cuda"
     
-    # --- RAG Tuning (FIX FOR ARTICLE 1) ---
-    # 1. Smaller Chunks: Ensures "Article 1" is the main topic of the chunk, not buried.
-    CHUNK_SIZE = 1000  # Reduced from 4000
-    CHUNK_OVERLAP = 200 # Reduced from 500
+    # --- Retrieval Settings (Parent-Child) ---
+    PARENT_CHUNK_SIZE = 2000
+    PARENT_CHUNK_OVERLAP = 200
     
-    # 2. Broader Retrieval: Fetch more candidates (100) to find the "needle in the haystack",
-    # then let the Reranker filter down to the best 10.
-    FETCH_K = 100      # Increased from 20 (Critical for legal docs with many references)
-    TOP_K = 10         # Final number of docs sent to LLM
+    CHILD_CHUNK_SIZE = 400
+    CHILD_CHUNK_OVERLAP = 50
+    
+    FETCH_K = 20 
+    TOP_K = 5    
     
     # --- Observability ---
     LANGCHAIN_TRACING_V2 = "true"

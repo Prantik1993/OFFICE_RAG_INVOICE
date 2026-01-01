@@ -1,6 +1,16 @@
 import os
+import logging
 from pathlib import Path
 from dotenv import load_dotenv
+
+# 1. Configure Global Logging (Standard Practice)
+# This setup ensures that logs from all files (ingest.py, chain.py) 
+# share the same format and timestamp style.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
 
 load_dotenv()
 
@@ -19,9 +29,10 @@ class Config:
     EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
     
     # RAG Settings
-    CHUNK_SIZE = 1000
-    CHUNK_OVERLAP = 200
-    TOP_K = 5
+    CHUNK_SIZE =4000
+    CHUNK_OVERLAP = 500
+    TOP_K = 10
+    FETCH_K=20
     
     # LangSmith (Observability)
     LANGCHAIN_TRACING_V2 = "true"

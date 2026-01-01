@@ -4,6 +4,8 @@ from ..utils.config import Config
 
 def get_vectorstore():
     """Returns the LangChain Chroma vector store instance."""
+    
+    # Use the embedding model directly from Config
     embedding_function = HuggingFaceEmbeddings(
         model_name=Config.EMBEDDING_MODEL
     )

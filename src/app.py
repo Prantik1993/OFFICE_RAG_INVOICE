@@ -3,23 +3,33 @@ from langchain_core.messages import HumanMessage, AIMessage
 from src.rag.chain import build_rag_chain
 from src.ingestion.ingest import ingest_documents
 
+# Note: Logging is configured automatically via src.utils.config 
+# when imports happen.
+
 st.set_page_config(page_title="Legal Policy RAG", layout="wide")
-st.title("⚖️ Legal Policy Chatbot (Modern Stack)")
+st.title("⚖️ Legal Policy Chatbot")
 
 # Sidebar
 with st.sidebar:
+    st.header("Admin Controls")
     if st.button("🔄 Ingest Documents"):
-        with st.spinner("Ingesting..."):
+        with st.spinner("Ingesting documents... Check logs for details."):
             ingest_documents()
-        st.success("Done!")
+        
+        # --- THE FIX: Force the app to reload the chain ---
+        st.success("Ingestion complete! Reloading brain...")
+        if "chain" in st.session_state:
+            del st.session_state["chain"]  # Delete the old empty chain
+        st.rerun()  # Restart the app to pick up new data
     
     if st.button("🧹 Clear Chat"):
         st.session_state.messages = []
         st.rerun()
 
-# Initialize Chain
+# Initialize Chain (Cached in Session State)
 if "chain" not in st.session_state:
-    st.session_state.chain = build_rag_chain()
+    with st.spinner("Initializing RAG Chain..."):
+        st.session_state.chain = build_rag_chain()
 
 # Chat Interface
 if "messages" not in st.session_state:
@@ -49,21 +59,21 @@ if prompt := st.chat_input("Ask about company policy..."):
         response_container = st.empty()
         full_response = ""
         
-        # Prepare inputs with history
-        chat_history = get_chat_history()
-        
-        # Stream response
-        # Note: chain now expects a dict with 'input' and 'chat_history'
-        chunks = st.session_state.chain.stream({
-            "input": prompt,
-            "chat_history": chat_history
-        })
-        
-        for chunk in chunks:
-            full_response += chunk
-            response_container.markdown(full_response + "▌")
-        
-        response_container.markdown(full_response)
-    
-    # 3. Save Assistant Message
-    st.session_state.messages.append({"role": "assistant", "content": full_response})
+        try:
+            # Stream response
+            chunks = st.session_state.chain.stream({
+                "input": prompt,
+                "chat_history": get_chat_history()
+            })
+            
+            for chunk in chunks:
+                full_response += chunk
+                response_container.markdown(full_response + "▌")
+            
+            response_container.markdown(full_response)
+            
+            # 3. Save Assistant Message
+            st.session_state.messages.append({"role": "assistant", "content": full_response})
+            
+        except Exception as e:
+            st.error(f"An error occurred: {e}")

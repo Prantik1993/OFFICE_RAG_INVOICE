@@ -1,5 +1,9 @@
 import os
 import pickle
+import logging
+from typing import List, Any, Optional
+
+from langchain_core.documents import Document
 from langchain_openai import ChatOpenAI
 from langchain.retrievers import EnsembleRetriever, ContextualCompressionRetriever
 from langchain.retrievers.document_compressors import CrossEncoderReranker
@@ -11,19 +15,35 @@ from langchain_core.runnables import RunnablePassthrough, RunnableBranch
 from ..vectorstore.store import get_vectorstore
 from ..utils.config import Config
 
-def format_docs(docs):
+# Initialize Logger
+logger = logging.getLogger(__name__)
+
+# ... imports ...
+
+def format_docs(docs: List[Document]) -> str:
     """Format retrieved documents for the prompt."""
     formatted = []
     for doc in docs:
         meta = doc.metadata
-        source_info = f"Source: {meta.get('filename', 'doc')} (Page {meta.get('page_number', 0)})"
+        
+        # FIX: PyMuPDFLoader uses 'source' and 'page'
+        file_path = meta.get("source", "Unknown")
+        
+        # Extract just the filename (e.g., "policy.pdf") from the full path
+        filename = os.path.basename(file_path) if file_path != "Unknown" else "doc"
+        
+        # Fix Page Number: PyMuPDF is 0-indexed, so we add 1 for humans
+        page = meta.get("page", 0) + 1 
+        
+        source_info = f"Source: {filename} (Page {page})"
         formatted.append(f"{source_info}\nContent: {doc.page_content}")
     return "\n\n".join(formatted)
 
-def load_bm25_retriever():
+
+def load_bm25_retriever() -> Optional[Any]:
     """Loads the persisted BM25 retriever or returns None on failure."""
     if not os.path.exists(Config.BM25_INDEX_PATH):
-        print(" BM25 index not found. Run ingestion first. Falling back to Vector only.")
+        logger.warning("BM25 index not found. Run ingestion first. Falling back to Vector only.")
         return None
     
     try:
@@ -32,21 +52,23 @@ def load_bm25_retriever():
             retriever.k = Config.TOP_K
             return retriever
     except Exception as e:
-        print(f"Failed to load BM25 index: {e}. Falling back to Vector only.")
+        logger.error(f"Failed to load BM25 index: {e}. Falling back to Vector only.")
         return None
 
-def build_rag_chain():
+def build_rag_chain() -> Any:
     """
     Builds the Conversational RAG Chain.
     """
     llm = ChatOpenAI(model=Config.OPENAI_MODEL, temperature=0)
     
-    # --- 1. Retriever Setup (Same as before) ---
+    # --- 1. Retriever Setup ---
     vectorstore = get_vectorstore()
-    vector_retriever = vectorstore.as_retriever(search_kwargs={"k": Config.TOP_K})
+    fetch_k = getattr(Config, "FETCH_K", 20)
+    vector_retriever = vectorstore.as_retriever(search_kwargs={"k": fetch_k})
     bm25_retriever = load_bm25_retriever()
 
     if bm25_retriever:
+        bm25_retriever.k = fetch_k
         base_retriever = EnsembleRetriever(
             retrievers=[bm25_retriever, vector_retriever],
             weights=[0.4, 0.6]
@@ -60,8 +82,8 @@ def build_rag_chain():
         final_retriever = ContextualCompressionRetriever(
             base_compressor=compressor, base_retriever=base_retriever
         )
-    except Exception:
-        print(" Reranker model failed to load. Using base retriever.")
+    except Exception as e:
+        logger.warning(f"Reranker model failed to load: {e}. Using base retriever.")
         final_retriever = base_retriever
 
     # --- 2. History-Awareness Logic ---
@@ -109,10 +131,6 @@ just reformulate it if needed and otherwise return it as is."""
     # - If chat_history is empty: pass 'input' directly to retriever
     # - If chat_history exists: pass through 'contextualize_q_prompt' first
     
-    def get_chat_history(x):
-        return x.get("chat_history", [])
-
-    # The Chain
     chain = (
         RunnablePassthrough.assign(
             context=RunnableBranch(
